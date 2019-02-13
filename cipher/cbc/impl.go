@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	cip "crypto/cipher"
 	"crypto/des"
-	"errors"
 	"github.com/liangx8/cipher-go/cipher"
 )
 
@@ -30,5 +29,3 @@ func NewDESCipher(key []byte) (cipher.Cipher, error) {
 	}
 	return &innerCBC{block}, nil
 }
-
-var ciperTooShortError = errors.New("Cipher text too short")

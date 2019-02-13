@@ -3,43 +3,78 @@ package cbc
 import (
 	cip "crypto/cipher"
 	"crypto/rand"
+	"github.com/liangx8/cipher-go/cipher"
 	"io"
 )
 
 type (
-	errWriter struct {
-		err error
-	}
 	innerCBCWriter struct {
-		raw  io.Writer
-		mode cip.BlockMode
+		raw    io.Writer
+		mode   cip.BlockMode
+		buf    []byte
+		bufIdx int
 	}
 )
 
-func (cipher *innerCBC) EncryptWriter(writer io.Writer) io.Writer {
-	iv := make([]byte, cipher.block.BlockSize())
+func (ci *innerCBC) EncryptWriter(writer io.Writer) io.WriteCloser {
+	iv := make([]byte, ci.block.BlockSize())
 	_, err := io.ReadFull(rand.Reader, iv)
 	if err != nil {
-		return &errWriter{err}
+		return cipher.ErrorWriter(err)
 	}
 	num, err := writer.Write(iv)
 	if err != nil {
-		return &errWriter{err}
+		return cipher.ErrorWriter(err)
 	}
-	if num < cipher.block.BlockSize() {
-		return &errWriter{ciperTooShortError}
+	if num < ci.block.BlockSize() {
+		// 接收方放弃即意味后面的内容无需再发送
+		return cipher.ErrorWriter(io.ErrUnexpectedEOF)
 	}
-	mode := cip.NewCBCEncrypter(cipher.block, iv)
-	return &innerCBCWriter{raw: writer, mode: mode}
+
+	mode := cip.NewCBCEncrypter(ci.block, iv)
+	return &innerCBCWriter{
+		raw:    writer,
+		mode:   mode,
+		buf:    cipher.LB.Get(),
+		bufIdx: 0,
+	}
 }
 func (w *innerCBCWriter) Write(p []byte) (int, error) {
-	w.mode.CryptBlocks(p, p)
-	num, err := w.raw.Write(p)
-	if err != nil {
-		return 0, err
+	pIdx := 0
+	totalSize := 0
+	for {
+		num := copy(w.buf[w.bufIdx:], p[pIdx:])
+		w.bufIdx += num
+		pIdx += num
+		if w.bufIdx == cipher.LEAKYBUFFER_SIZE {
+			w.mode.CryptBlocks(w.buf, w.buf)
+			total, err := w.raw.Write(w.buf)
+			if err != nil {
+				return 0, err
+			}
+			w.bufIdx = 0
+			totalSize += total
+		} else {
+			remand := w.bufIdx % w.mode.BlockSize()
+			blockSize := w.bufIdx - remand
+			if blockSize > 0 {
+				w.mode.CryptBlocks(w.buf[:blockSize], w.buf[:blockSize])
+				total, err := w.raw.Write(w.buf[:blockSize])
+				if err != nil {
+					return 0, err
+				}
+				totalSize += total
+			}
+			if remand > 0 {
+				copy(w.buf[:remand], w.buf[blockSize:w.bufIdx])
+			}
+			w.bufIdx = remand
+			break
+		}
 	}
-	return num, nil
+	return totalSize, nil
 }
-func (e *errWriter) Write(p []byte) (int, error) {
-	return 0, e.err
+func (w *innerCBCWriter) Close() error {
+	cipher.LB.Put(w.buf)
+	return nil
 }
